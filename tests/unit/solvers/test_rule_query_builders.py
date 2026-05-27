@@ -502,13 +502,13 @@ class TestOMOPRuleQueryBuilder():
 
         builder.add_concept_constraint(99999)
         builder.add_numeric_range(1.0, 100.0)
-        
+
         result = builder.build()
-        
+
         # Count UNION occurrences (should be 3 for 4 queries)
         query_str = str(result)
         union_count = query_str.count("UNION")
-        
+
         # 4 queries connected by 3 UNIONs
         assert union_count == 4
 
@@ -552,6 +552,36 @@ class TestOMOPRuleQueryBuilder():
 
         assert "location" not in query_str.lower()
 
+    def test_location_varcat_with_source_value_adds_in_clause(self) -> None:
+        from sqlalchemy.dialects import postgresql
+        mock_db_manager = Mock()
+        builder = OMOPRuleQueryBuilder(mock_db_manager, include_location=True, varcat="Location")
+
+        builder.add_location_source_value_constraints(["GBR"])
+
+        query_str = str(builder.build().compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        ))
+        assert "location.location_source_value" in query_str
+        assert "GBR" in query_str
+
+    def test_location_varcat_multiple_source_values_uses_in(self) -> None:
+        from sqlalchemy.dialects import postgresql
+        mock_db_manager = Mock()
+        builder = OMOPRuleQueryBuilder(mock_db_manager, include_location=True, varcat="Location")
+
+        builder.add_location_source_value_constraints(["GBR", "UK"])
+
+        query_str = str(builder.build().compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        ))
+        assert "location.location_source_value" in query_str
+        assert "GBR" in query_str
+        assert "UK" in query_str
+        assert "IN" in query_str.upper()
+
     def test_haversine_radius_constraint_adds_where_clause(self) -> None:
         """add_haversine_radius_constraint adds distance and NULL guards to location_query."""
         mock_db_manager = Mock()
@@ -560,10 +590,7 @@ class TestOMOPRuleQueryBuilder():
 
         builder.add_haversine_radius_constraint(51.5074, -0.1278, 5000.0)
 
-        query_str = str(builder.build().compile(
-            dialect=postgresql.dialect(),
-            compile_kwargs={"literal_binds": True},
-        ))
+        query_str = str(builder.build())
         assert "latitude" in query_str
         assert "longitude" in query_str
         assert "asin" in query_str.lower() or "sin" in query_str.lower()

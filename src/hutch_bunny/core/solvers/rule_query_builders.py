@@ -536,6 +536,14 @@ class OMOPRuleQueryBuilder:
 
         return self
 
+    def add_location_source_value_constraints(self, values: list[str]) -> 'OMOPRuleQueryBuilder':
+        """Filter the location query to rows where location_source_value is in the given list."""
+        if self.location_query is not None and values:
+            self.location_query = self.location_query.where(
+                Location.location_source_value.in_(values)
+            )
+        return self
+
     def build(self) -> CompoundSelect:
         """
         Combine all table queries into a single UNION query.
@@ -562,17 +570,18 @@ class OMOPRuleQueryBuilder:
             return union(select(Person.person_id).where(text("1=0")))
 
         queries: list[Select[Tuple[int]]] = [
-            self.measurement_query,
-            self.observation_query,
-            self.condition_query,
-            self.drug_query,
-            self.procedure_query,
+            q for q in [
+                self.measurement_query,
+                self.observation_query,
+                self.condition_query,
+                self.drug_query,
+                self.procedure_query,
+                self.specimen_query,
+                self.death_query,
+                self.location_query,
+            ]
+            if q is not None
         ]
-        if self.specimen_query is not None:
-            queries.append(self.specimen_query)
-        if self.death_query is not None:
-            queries.append(self.death_query)
-
         return union(*queries)
 
 
