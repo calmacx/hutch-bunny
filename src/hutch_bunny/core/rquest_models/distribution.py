@@ -9,13 +9,15 @@ class DistributionQueryType(str, Enum):
     DEMOGRAPHICS = "DEMOGRAPHICS"
     GENERIC = "GENERIC"
     ICD_MAIN = "ICD-MAIN"
+    TABLE_COUNTS = "TABLE_COUNTS"
 
     @property
-    def file_name(self) -> Literal["demographics.distribution", "code.distribution"]:
+    def file_name(self) -> Literal["demographics.distribution", "code.distribution", "table.counts"]:
         """Get the corresponding file name for this distribution type."""
         mapping = {
             DistributionQueryType.DEMOGRAPHICS: "demographics.distribution",
             DistributionQueryType.GENERIC: "code.distribution",
+            DistributionQueryType.TABLE_COUNTS: "table.counts",
         }
         if self not in mapping:
             raise ValueError(f"No file name mapping for query type: {self}")

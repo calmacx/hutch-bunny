@@ -9,14 +9,15 @@ class File(BaseModel):
     Specifies the file details of a query.
     """
 
-    name: Literal["demographics.distribution", "code.distribution", "metadata.bcos"] = (
-        Field(alias="file_name")
-    )
+    name: Literal[
+        "demographics.distribution", "code.distribution", "metadata.bcos", "table.counts"
+    ] = Field(alias="file_name")
     """
     Name of the file.
 
     `demographics.distribution` for demographics distribution.
     `code.distribution` for code distribution.
+    `table.counts` for table counts distribution.
     """
 
     data: str = Field(alias="file_data")

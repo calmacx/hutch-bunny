@@ -15,7 +15,7 @@ from hutch_bunny.core.settings import Settings
 from hutch_bunny.core.solvers.demographics_solver import (
     DemographicsDistributionQuerySolver,
 )
-from hutch_bunny.core.solvers.distribution_solver import CodeDistributionQuerySolver
+from hutch_bunny.core.solvers.distribution_solver import CodeDistributionQuerySolver, TableCountsDistributionQuerySolver
 from hutch_bunny.core.services.metadata_service import MetadataService
 from hutch_bunny.core.telemetry import trace_operation
 from hutch_bunny.core.obfuscation import encode_output
@@ -58,23 +58,26 @@ def solve_availability(
 
 def _get_distribution_solver(
     db_client: BaseDBClient, query: DistributionQuery
-) -> CodeDistributionQuerySolver | DemographicsDistributionQuerySolver:
+) -> CodeDistributionQuerySolver | DemographicsDistributionQuerySolver | TableCountsDistributionQuerySolver:
     """Return a distribution query solver depending on the query.
     If `query.code` is "GENERIC", return a `CodeDistributionQuerySolver`.
     If `query.code` is "DEMOGRAPHICS", return a `DemographicsDistributionQuerySolver`.
+    If `query.code` is "TABLE_COUNTS", return a `TableCountsDistributionQuerySolver`.
 
     Args:
         db_client (BaseDBClient): The database client.
         query (DistributionQuery): The distribution query to solve.
 
     Returns:
-        CodeDistributionQuerySolver | DemographicsDistributionQuerySolver: The solver for the distribution query type.
+        CodeDistributionQuerySolver | DemographicsDistributionQuerySolver | TableCountsDistributionQuerySolver: The solver for the distribution query type.
     """
 
     if query.code == DistributionQueryType.GENERIC:
         return CodeDistributionQuerySolver(db_client, query)
     if query.code == DistributionQueryType.DEMOGRAPHICS:
         return DemographicsDistributionQuerySolver(db_client, query)
+    if query.code == DistributionQueryType.TABLE_COUNTS:
+        return TableCountsDistributionQuerySolver(db_client, query)
     raise NotImplementedError(f"Queries with code: {query.code} are not yet supported.")
 
 
