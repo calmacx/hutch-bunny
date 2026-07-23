@@ -15,7 +15,8 @@ from hutch_bunny.core.db.entities import (
     Observation,
     Person,
     DrugExposure,
-    ProcedureOccurrence, Specimen,
+    ProcedureOccurrence,
+    Specimen,
 )
 from tenacity import (
     retry,
@@ -47,9 +48,10 @@ class CodeDistributionRow(BaseModel):
     """
     A single row in the distribution output.
     """
+
     biobank: str = Field(alias="BIOBANK")
     code: str = Field(alias="CODE")
-    count: int = Field(alias="COUNT")  
+    count: int = Field(alias="COUNT")
     description: str = Field(default="", alias="DESCRIPTION")
     min_val: str = Field(default="", alias="MIN")
     q1: str = Field(default="", alias="Q1")
@@ -66,18 +68,15 @@ class CodeDistributionRow(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
-def convert_rows_to_tsv(
-    output_cols: list[str],
-    rows: Sequence[BaseModel]
-) -> str:
+def convert_rows_to_tsv(output_cols: list[str], rows: Sequence[BaseModel]) -> str:
     """Convert list of Pydantic models to TSV string."""
     results = ["\t".join(output_cols)]
-    
+
     for row in rows:
         row_dict = row.model_dump(by_alias=True, mode="json")
         row_values = [str(row_dict.get(col, "")) for col in output_cols]
         results.append("\t".join(row_values))
-    
+
     return os.linesep.join(results)
 
 
@@ -148,7 +147,6 @@ class CodeDistributionQuerySolver:
         after=after_log(logger, INFO),
     )
     def solve_query(self, results_modifier: list[ResultModifier]) -> Tuple[str, int]:
-
         """Build table of distribution query and return as a TAB separated string
         along with the number of rows.
 
@@ -181,7 +179,6 @@ class CodeDistributionQuerySolver:
 
         with self.db_client.engine.connect() as con:
             for domain_id in self.allowed_domains_map:
-
                 if not settings.OMOP_SPECIMEN_ENABLED and domain_id == "Specimen":
                     continue
 
@@ -195,31 +192,30 @@ class CodeDistributionQuerySolver:
                 subq = (
                     select(
                         concept_col.label("concept_id"),
-                        func.count(distinct(table.person_id)).label("count_agg")
+                        func.count(distinct(table.person_id)).label("count_agg"),
                     )
                     .group_by(concept_col)
                     .subquery()
                 )
 
                 # Step 2: join with Concept table
-                stmnt = (
-                    select(
-                        # Apply rounding only here, after the join
-                        (func.round(subq.c.count_agg / rounding, 0) * rounding).label("count_agg_rounded")
-                        if rounding > 0 else subq.c.count_agg,
-                        Concept.concept_id,
-                        Concept.concept_name
+                stmnt = select(
+                    # Apply rounding only here, after the join
+                    (func.round(subq.c.count_agg / rounding, 0) * rounding).label(
+                        "count_agg_rounded"
                     )
-                    .join(Concept, subq.c.concept_id == Concept.concept_id)
-                )
+                    if rounding > 0
+                    else subq.c.count_agg,
+                    Concept.concept_id,
+                    Concept.concept_name,
+                ).join(Concept, subq.c.concept_id == Concept.concept_id)
 
                 # Step 3: optional low-number filter
                 if low_number > 0:
                     stmnt = stmnt.where(subq.c.count_agg >= low_number)
 
                 compiled = stmnt.compile(
-                    dialect=con.engine.dialect,
-                    compile_kwargs={"literal_binds": True}
+                    dialect=con.engine.dialect, compile_kwargs={"literal_binds": True}
                 )
                 logger.debug(compiled)
                 # Execute
@@ -271,9 +267,9 @@ class TableCountsDistributionQuerySolver:
     """
     Solve a TABLE_COUNTS distribution query.
 
-    Returns one row per OMOP table that physically exists in the connected database,
-    with the row count for that table. Tables absent from the database are omitted
-    entirely; a count of 0 means the table exists but contains no rows.
+    Returns one row per known OMOP table. A count of -1 means the table does not
+    exist in the connected database; a count of 0 means the table exists but
+    contains no rows.
     """
 
     OMOP_ENTITIES: list[tuple[str, type]] = [
@@ -295,10 +291,10 @@ class TableCountsDistributionQuerySolver:
         self.query = query
 
     def solve_query(self, results_modifier: list[ResultModifier]) -> Tuple[str, int]:
-        """Count rows in each OMOP table that exists in the connected database.
+        """Count rows in each known OMOP table.
 
-        Tables not present in the database are skipped. Returns a TSV string and
-        the number of rows (i.e. the number of tables found).
+        Tables not present in the connected database get a count of -1. Returns a
+        TSV string and the number of rows (i.e. the number of known tables).
         """
         existing = {t.lower() for t in self.db_client.list_tables()}
         rows: list[TableCountsRow] = []
@@ -306,12 +302,17 @@ class TableCountsDistributionQuerySolver:
         with self.db_client.engine.connect() as con:
             for table_name, entity in self.OMOP_ENTITIES:
                 if table_name not in existing:
-                    continue
-                result = con.execute(select(func.count()).select_from(entity))
-                count = result.scalar() or 0
+                    count = -1
+                else:
+                    result = con.execute(select(func.count()).select_from(entity))
+                    count = result.scalar() or 0
                 rows.append(
                     TableCountsRow(
-                        **{"BIOBANK": self.query.collection, "TABLE": table_name, "COUNT": count}
+                        **{
+                            "BIOBANK": self.query.collection,
+                            "TABLE": table_name,
+                            "COUNT": count,
+                        }
                     )
                 )
 

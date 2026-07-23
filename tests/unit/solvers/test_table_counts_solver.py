@@ -27,28 +27,30 @@ def _make_db_client(table_names: list[str], row_count: int = 5) -> MagicMock:
     return mock
 
 
-def test_only_existing_tables_appear_in_output(query: DistributionQuery) -> None:
-    """Tables not in list_tables() are omitted from the result."""
+def test_all_known_tables_appear_in_output(query: DistributionQuery) -> None:
+    """Every table in OMOP_ENTITIES gets a row, present or not."""
     db_client = _make_db_client(["person", "concept"])
     solver = TableCountsDistributionQuerySolver(db_client, query)
 
     tsv, row_count = solver.solve_query([])
 
-    assert row_count == 2
+    assert row_count == len(TableCountsDistributionQuerySolver.OMOP_ENTITIES)
     assert "person" in tsv
     assert "concept" in tsv
-    assert "measurement" not in tsv
-    assert "condition_occurrence" not in tsv
+    assert "measurement" in tsv
+    assert "condition_occurrence" in tsv
 
 
-def test_absent_table_not_in_output(query: DistributionQuery) -> None:
-    """A table absent from the DB produces no row, not a zero row."""
+def test_absent_table_has_count_of_negative_one(query: DistributionQuery) -> None:
+    """A table absent from the DB produces a row with COUNT=-1."""
     db_client = _make_db_client(["person"])
     solver = TableCountsDistributionQuerySolver(db_client, query)
 
     tsv, _ = solver.solve_query([])
 
-    assert "specimen" not in tsv
+    lines = tsv.strip().splitlines()
+    specimen_line = next(line for line in lines if "specimen" in line)
+    assert specimen_line.endswith("\t-1")
 
 
 def test_zero_count_for_empty_table(query: DistributionQuery) -> None:
@@ -58,7 +60,7 @@ def test_zero_count_for_empty_table(query: DistributionQuery) -> None:
 
     tsv, row_count = solver.solve_query([])
 
-    assert row_count == 2
+    assert row_count == len(TableCountsDistributionQuerySolver.OMOP_ENTITIES)
     lines = tsv.strip().splitlines()
     data_lines = [line for line in lines if "person" in line or "measurement" in line]
     for line in data_lines:
@@ -91,17 +93,21 @@ def test_case_insensitive_table_matching(query: DistributionQuery) -> None:
 
     tsv, row_count = solver.solve_query([])
 
-    assert row_count == 2
-    assert "person" in tsv
-    assert "measurement" in tsv
+    assert row_count == len(TableCountsDistributionQuerySolver.OMOP_ENTITIES)
+    lines = tsv.strip().splitlines()
+    person_line = next(line for line in lines if "\tperson\t" in line)
+    measurement_line = next(line for line in lines if "\tmeasurement\t" in line)
+    assert person_line.endswith("\t3")
+    assert measurement_line.endswith("\t3")
 
 
-def test_empty_database_returns_empty_result(query: DistributionQuery) -> None:
+def test_empty_database_returns_all_negative_one(query: DistributionQuery) -> None:
+    """No tables present in the DB: every known table gets a row with COUNT=-1."""
     db_client = _make_db_client([])
     solver = TableCountsDistributionQuerySolver(db_client, query)
 
     tsv, row_count = solver.solve_query([])
 
-    assert row_count == 0
-    lines = [line for line in tsv.splitlines() if line.strip()]
-    assert lines == ["BIOBANK\tTABLE\tCOUNT"]
+    assert row_count == len(TableCountsDistributionQuerySolver.OMOP_ENTITIES)
+    lines = tsv.strip().splitlines()[1:]
+    assert all(line.endswith("\t-1") for line in lines)
