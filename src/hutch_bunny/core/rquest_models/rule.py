@@ -2,6 +2,8 @@ import re
 from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
+from hutch_bunny.core.omop import Varcat
+
 
 class Rule(BaseModel):
     """
@@ -20,17 +22,7 @@ class Rule(BaseModel):
     - `OMOP=21490742`: For Measurement searches
     """
 
-    varcat: Literal[
-        "Person",
-        "Condition",
-        "Observation",
-        "Drug",
-        "Measurement",
-        "Medication",
-        "Procedure",
-        "Specimen",
-        "Location",
-    ]
+    varcat: Varcat
     """
     Table to search in.
     """
@@ -61,6 +53,9 @@ class Rule(BaseModel):
     TEXT searches have a OMOP concept_id (for example `8507`)
 
     NUM searches have a range value split by `|` (for example 1.0|3.0)
+
+    For `varcat: "Location"` TEXT searches, the concept_id is matched against
+    `country_concept_id` rather than a table-specific concept column.
     """
 
     time: str | None = None

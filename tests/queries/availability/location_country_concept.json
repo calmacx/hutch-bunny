@@ -1,5 +1,5 @@
 {
-  "task_id": "job-location-geo-radius",
+  "task_id": "job-location-country-concept",
   "project": "project_id",
   "owner": "user1",
   "cohort": {
@@ -9,9 +9,9 @@
           {
             "varname": "OMOP",
             "varcat": "Location",
-            "type": "GEO_RADIUS",
+            "type": "TEXT",
             "oper": "=",
-            "value": "55.9533|-3.1883|10000"
+            "value": "4330435"
           }
         ],
         "rules_oper": "AND"
