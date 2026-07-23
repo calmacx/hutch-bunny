@@ -1,6 +1,7 @@
 {
   "code": "LOCATION",
   "analysis": "DISTRIBUTION",
+  "location_scan_type": "SOURCE_VALUE",
   "uuid": "unique_id",
   "collection": "collection_id",
   "owner": "user1"

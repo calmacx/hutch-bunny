@@ -3,6 +3,7 @@ from hutch_bunny.core.logger import logger, INFO
 from typing import Tuple, Type, Union, Sequence
 
 from sqlalchemy import distinct, func
+from sqlalchemy.engine import Connection
 from pydantic import BaseModel, Field, ConfigDict
 
 from hutch_bunny.core.obfuscation import apply_filters
@@ -24,7 +25,7 @@ from tenacity import (
     before_sleep_log,
     after_log,
 )
-from hutch_bunny.core.rquest_models.distribution import DistributionQuery
+from hutch_bunny.core.rquest_models.distribution import DistributionQuery, LocationScanType
 from sqlalchemy import select
 from hutch_bunny.core.solvers.availability_solver import ResultModifier
 from hutch_bunny.core.db.utils import log_query
@@ -263,8 +264,9 @@ class LocationDistributionQuerySolver:
     """
     Solve location distribution queries.
 
-    Groups people by (location.country_concept_id, location.location_source_value),
-    joins the Concept table for country name, and returns a TSV in the same
+    Groups people by one of `location.location_source_value`,
+    `location.country_concept_id`, or `(location.latitude, location.longitude)` -
+    selected via `query.location_scan_type` - and returns a TSV in the same
     column shape as CodeDistributionQuerySolver.
     """
 
@@ -315,52 +317,116 @@ class LocationDistributionQuerySolver:
             10,
         )
 
+        scan_type = self.query.location_scan_type
+        if scan_type is None:
+            raise ValueError(
+                "'location_scan_type' is required to solve a LOCATION distribution query."
+            )
+
         with self.db_client.engine.connect() as con:
-            # Step 1: count distinct persons per (country_concept_id, location_source_value)
-            subq = (
-                select(
-                    Location.country_concept_id.label("country_concept_id"),
-                    Location.location_source_value.label("location_source_value"),
-                    func.count(distinct(Person.person_id)).label("count_agg"),
-                )
-                .join(Person, Person.location_id == Location.location_id)
-                .group_by(Location.country_concept_id, Location.location_source_value)
-                .subquery()
-            )
+            if scan_type == LocationScanType.SOURCE_VALUE:
+                rows = self._scan_source_value(con, low_number, rounding, results_modifier)
+            elif scan_type == LocationScanType.CONCEPT_CODE:
+                rows = self._scan_concept_code(con, low_number, rounding, results_modifier)
+            else:
+                rows = self._scan_lat_long(con, low_number, rounding, results_modifier)
 
-            # Step 2: LEFT JOIN concept for country name; apply rounding and suppression
-            count_expr = (
-                (func.round(subq.c.count_agg / rounding, 0) * rounding).label("count_agg_rounded")
-                if rounding > 0
-                else subq.c.count_agg
-            )
-            stmnt = (
-                select(
-                    count_expr,
-                    subq.c.country_concept_id,
-                    subq.c.location_source_value,
-                    Concept.concept_name,
-                )
-                .outerjoin(Concept, subq.c.country_concept_id == Concept.concept_id)
-            )
+        tsv_string = convert_rows_to_tsv(self.output_cols, rows)
+        return tsv_string, len(rows)
 
-            if low_number > 0:
-                stmnt = stmnt.where(subq.c.count_agg >= low_number)
+    def _scan_source_value(
+        self,
+        con: Connection,
+        low_number: int,
+        rounding: int,
+        results_modifier: list[ResultModifier],
+    ) -> list[CodeDistributionRow]:
+        """Count distinct persons per location_source_value."""
+        subq = (
+            select(
+                Location.location_source_value.label("location_source_value"),
+                func.count(distinct(Person.person_id)).label("count_agg"),
+            )
+            .join(Person, Person.location_id == Location.location_id)
+            .group_by(Location.location_source_value)
+            .subquery()
+        )
 
-            log_query(stmnt, self.db_client.engine)
-            res = con.execute(stmnt).fetchall()
+        count_expr = (
+            (func.round(subq.c.count_agg / rounding, 0) * rounding).label("count_agg_rounded")
+            if rounding > 0
+            else subq.c.count_agg
+        )
+        stmnt = select(count_expr, subq.c.location_source_value)
+
+        if low_number > 0:
+            stmnt = stmnt.where(subq.c.count_agg >= low_number)
+
+        log_query(stmnt, self.db_client.engine)
+        res = con.execute(stmnt).fetchall()
 
         rows = []
         for row in res:
-            rounded_count, country_concept_id, location_source_value, concept_name = row
+            rounded_count, location_source_value = row
             count_val = apply_filters(int(rounded_count), results_modifier)
-            omop_str = str(country_concept_id) if country_concept_id is not None else ""
-            concept_str = concept_name if concept_name is not None else ""
             source_val = location_source_value if location_source_value is not None else ""
             rows.append(
                 CodeDistributionRow(
                     biobank=self.query.collection,
                     code=source_val,
+                    count=count_val,
+                    omop="",
+                    omop_descr="",
+                    category="Location",
+                )
+            )
+        return rows
+
+    def _scan_concept_code(
+        self,
+        con: Connection,
+        low_number: int,
+        rounding: int,
+        results_modifier: list[ResultModifier],
+    ) -> list[CodeDistributionRow]:
+        """Count distinct persons per country_concept_id."""
+        subq = (
+            select(
+                Location.country_concept_id.label("country_concept_id"),
+                func.count(distinct(Person.person_id)).label("count_agg"),
+            )
+            .join(Person, Person.location_id == Location.location_id)
+            .group_by(Location.country_concept_id)
+            .subquery()
+        )
+
+        # LEFT JOIN concept for country name; apply rounding and suppression
+        count_expr = (
+            (func.round(subq.c.count_agg / rounding, 0) * rounding).label("count_agg_rounded")
+            if rounding > 0
+            else subq.c.count_agg
+        )
+        stmnt = (
+            select(count_expr, subq.c.country_concept_id, Concept.concept_name)
+            .outerjoin(Concept, subq.c.country_concept_id == Concept.concept_id)
+        )
+
+        if low_number > 0:
+            stmnt = stmnt.where(subq.c.count_agg >= low_number)
+
+        log_query(stmnt, self.db_client.engine)
+        res = con.execute(stmnt).fetchall()
+
+        rows = []
+        for row in res:
+            rounded_count, country_concept_id, concept_name = row
+            count_val = apply_filters(int(rounded_count), results_modifier)
+            omop_str = str(country_concept_id) if country_concept_id is not None else ""
+            concept_str = concept_name if concept_name is not None else ""
+            rows.append(
+                CodeDistributionRow(
+                    biobank=self.query.collection,
+                    code=omop_str,
                     count=count_val,
                     description=concept_str,
                     omop=omop_str,
@@ -368,6 +434,54 @@ class LocationDistributionQuerySolver:
                     category="Location",
                 )
             )
+        return rows
 
-        tsv_string = convert_rows_to_tsv(self.output_cols, rows)
-        return tsv_string, len(rows)
+    def _scan_lat_long(
+        self,
+        con: Connection,
+        low_number: int,
+        rounding: int,
+        results_modifier: list[ResultModifier],
+    ) -> list[CodeDistributionRow]:
+        """Count distinct persons per unique (latitude, longitude) pair."""
+        subq = (
+            select(
+                Location.latitude.label("latitude"),
+                Location.longitude.label("longitude"),
+                func.count(distinct(Person.person_id)).label("count_agg"),
+            )
+            .join(Person, Person.location_id == Location.location_id)
+            .where(Location.latitude.is_not(None), Location.longitude.is_not(None))
+            .group_by(Location.latitude, Location.longitude)
+            .subquery()
+        )
+
+        count_expr = (
+            (func.round(subq.c.count_agg / rounding, 0) * rounding).label("count_agg_rounded")
+            if rounding > 0
+            else subq.c.count_agg
+        )
+        stmnt = select(count_expr, subq.c.latitude, subq.c.longitude)
+
+        if low_number > 0:
+            stmnt = stmnt.where(subq.c.count_agg >= low_number)
+
+        log_query(stmnt, self.db_client.engine)
+        res = con.execute(stmnt).fetchall()
+
+        rows = []
+        for row in res:
+            rounded_count, latitude, longitude = row
+            count_val = apply_filters(int(rounded_count), results_modifier)
+            code_str = f"{latitude},{longitude}"
+            rows.append(
+                CodeDistributionRow(
+                    biobank=self.query.collection,
+                    code=code_str,
+                    count=count_val,
+                    omop="",
+                    omop_descr="",
+                    category="Location",
+                )
+            )
+        return rows

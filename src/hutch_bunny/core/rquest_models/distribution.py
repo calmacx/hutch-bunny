@@ -1,6 +1,14 @@
 from enum import Enum
-from typing import Literal
-from pydantic import BaseModel, field_validator
+from typing import Literal, Optional
+from pydantic import BaseModel, field_validator, model_validator
+
+
+class LocationScanType(str, Enum):
+    """Fields that a `LOCATION` distribution query can group/count over."""
+
+    SOURCE_VALUE = "SOURCE_VALUE"
+    CONCEPT_CODE = "CONCEPT_CODE"
+    LAT_LONG = "LAT_LONG"
 
 
 class DistributionQueryType(str, Enum):
@@ -54,6 +62,12 @@ class DistributionQuery(BaseModel):
     Collection of the query. This is the unique collection that the query is being run on.
     """
 
+    location_scan_type: Optional[LocationScanType] = None
+    """
+    Field to group/count over for `LOCATION` distribution queries. Required when
+    `code` is `LOCATION`; one of `SOURCE_VALUE`, `CONCEPT_CODE`, or `LAT_LONG`.
+    """
+
     @field_validator("code", mode="before")
     @classmethod
     def validate_code(cls, v: str) -> DistributionQueryType:
@@ -75,3 +89,41 @@ class DistributionQuery(BaseModel):
             raise ValueError(
                 f"'{v}' is not a valid distribution query type. Valid values are: {', '.join(repr(v) for v in valid_values)}"
             )
+
+    @field_validator("location_scan_type", mode="before")
+    @classmethod
+    def validate_location_scan_type(cls, v: str | None) -> LocationScanType | None:
+        """Validate that the location scan type is a valid option.
+
+        Args:
+            v (str | None): The location scan type value to validate
+
+        Raises:
+            ValueError: If the value is not a valid location scan type
+
+        Returns:
+            LocationScanType | None: The validated enum value
+        """
+        if v is None:
+            return None
+        try:
+            return LocationScanType(v)
+        except ValueError:
+            valid_values = [t.value for t in LocationScanType]
+            raise ValueError(
+                f"'{v}' is not a valid location scan type. Valid values are: {', '.join(repr(v) for v in valid_values)}"
+            )
+
+    @model_validator(mode="after")
+    def validate_location_scan_type_required(self) -> "DistributionQuery":
+        """Require `location_scan_type` whenever `code` is `LOCATION`.
+
+        Raises:
+            ValueError: If `code` is `LOCATION` and `location_scan_type` is not set
+        """
+        if self.code == DistributionQueryType.LOCATION and self.location_scan_type is None:
+            valid_values = [t.value for t in LocationScanType]
+            raise ValueError(
+                f"'location_scan_type' is required when code is 'LOCATION'. Valid values are: {', '.join(repr(v) for v in valid_values)}"
+            )
+        return self
