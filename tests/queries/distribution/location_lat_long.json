@@ -1,0 +1,8 @@
+{
+  "code": "LOCATION",
+  "analysis": "DISTRIBUTION",
+  "location_scan_type": "LAT_LONG",
+  "uuid": "unique_id",
+  "collection": "collection_id",
+  "owner": "user1"
+}
