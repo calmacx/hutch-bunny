@@ -2,6 +2,7 @@ import pytest
 from hutch_bunny.core.rquest_models.distribution import (
     DistributionQuery,
     DistributionQueryType,
+    LocationScanType,
 )
 
 
@@ -85,3 +86,72 @@ def test_distribution_query_required_fields() -> None:
             analysis="DISTRIBUTION",
             uuid="test-uuid",
         )
+
+
+def test_location_scan_type_enum() -> None:
+    """Test the LocationScanType enum values."""
+    assert LocationScanType.SOURCE_VALUE.value == "SOURCE_VALUE"
+    assert LocationScanType.CONCEPT_CODE.value == "CONCEPT_CODE"
+    assert LocationScanType.LAT_LONG.value == "LAT_LONG"
+
+
+@pytest.mark.parametrize(
+    "scan_type",
+    [
+        LocationScanType.SOURCE_VALUE,
+        LocationScanType.CONCEPT_CODE,
+        LocationScanType.LAT_LONG,
+    ],
+)
+def test_location_query_with_valid_scan_type(scan_type: LocationScanType) -> None:
+    """Test creating a LOCATION query with each valid location_scan_type."""
+    query = DistributionQuery(
+        owner="user1",
+        code=DistributionQueryType.LOCATION,
+        analysis="DISTRIBUTION",
+        uuid="test-uuid",
+        collection="test-collection",
+        location_scan_type=scan_type,
+    )
+
+    assert query.location_scan_type == scan_type
+
+
+def test_location_query_missing_scan_type_raises() -> None:
+    """Test that a LOCATION query without location_scan_type is rejected."""
+    with pytest.raises(ValueError, match="'location_scan_type' is required"):
+        DistributionQuery(
+            owner="user1",
+            code=DistributionQueryType.LOCATION,
+            analysis="DISTRIBUTION",
+            uuid="test-uuid",
+            collection="test-collection",
+        )
+
+
+def test_location_query_invalid_scan_type_raises() -> None:
+    """Test that an invalid location_scan_type value is rejected."""
+    with pytest.raises(
+        ValueError, match="'INVALID' is not a valid location scan type"
+    ):
+        DistributionQuery(
+            owner="user1",
+            code=DistributionQueryType.LOCATION,
+            analysis="DISTRIBUTION",
+            uuid="test-uuid",
+            collection="test-collection",
+            location_scan_type="INVALID",  # type: ignore
+        )
+
+
+def test_non_location_query_does_not_require_scan_type() -> None:
+    """Test that non-LOCATION queries don't require location_scan_type."""
+    query = DistributionQuery(
+        owner="user1",
+        code=DistributionQueryType.GENERIC,
+        analysis="DISTRIBUTION",
+        uuid="test-uuid",
+        collection="test-collection",
+    )
+
+    assert query.location_scan_type is None
