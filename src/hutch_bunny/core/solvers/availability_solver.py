@@ -242,7 +242,7 @@ class AvailabilitySolver():
         current_group: Group,
         person_constraints_for_group: list[ColumnElement[bool]],
         rule_table_queries: list[RuleTableQuery],
-        nested_group_queries: list[Union[Select[Tuple[int]], CompoundSelect[Tuple[int]]]] | None = None
+        nested_group_queries: list[Select[tuple[int]] | CompoundSelect[tuple[int]]] | None = None
     ) -> Union[Select[Tuple[int]], CompoundSelect]:
         """
         Construct the query for a single group by processing inclusion/exclusion rules.
@@ -346,8 +346,8 @@ class AvailabilitySolver():
 
     def _combine_group_queries(
         self,
-        all_groups_queries: list[Union[Select[Tuple[int]], CompoundSelect[Tuple[int]]]]
-    ) -> Union[Select[Tuple[int]], CompoundSelect[Tuple[int]]] | None:
+        all_groups_queries: list[Select[tuple[int]] | CompoundSelect[tuple[int]]]
+    ) -> Select[tuple[int]] | CompoundSelect[tuple[int]] | None:
         """
         Combine each group's query into a single statement yielding person_ids.
 
@@ -376,10 +376,10 @@ class AvailabilitySolver():
 
     @staticmethod
     def _apply_obfuscation(
-        query: Select[Tuple[int]],
+        query: Select[tuple[int]],
         count_expression: ColumnElement[Any],
         low_number: int
-    ) -> Select[Tuple[int]]:
+    ) -> Select[tuple[int]]:
         """
         Apply low-number suppression to a count query.
 
