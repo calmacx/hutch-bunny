@@ -1,0 +1,488 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hdruk.github.io/hutch-bunny/availability-query.schema.json",
+  "$defs": {
+    "AgeRange": {
+      "description": "An age range in years, inclusive at both ends.\n\nEither bound may be omitted for an open-ended range, but at least one must be\npresent.",
+      "properties": {
+        "min": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Min"
+        },
+        "max": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max"
+        }
+      },
+      "title": "AgeRange",
+      "type": "object"
+    },
+    "Cohort": {
+      "description": "Represents a collection of groups with an operator to combine them.",
+      "properties": {
+        "groups": {
+          "items": {
+            "$ref": "#/$defs/Group"
+          },
+          "title": "Groups",
+          "type": "array"
+        },
+        "groups_oper": {
+          "enum": [
+            "AND",
+            "OR"
+          ],
+          "title": "Groups Oper",
+          "type": "string"
+        }
+      },
+      "required": [
+        "groups_oper"
+      ],
+      "title": "Cohort",
+      "type": "object"
+    },
+    "ConceptFilter": {
+      "description": "A filter on one `person` concept column, as a list of OMOP concept ids\ncombined with `IN`.\n\nMay be written as a bare list (`[8507, 8532]`) or in full\n(`{\"concepts\": [8507], \"exclude\": true}`).",
+      "properties": {
+        "concepts": {
+          "items": {
+            "type": "integer"
+          },
+          "minItems": 1,
+          "title": "Concepts",
+          "type": "array"
+        },
+        "exclude": {
+          "default": false,
+          "title": "Exclude",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "concepts"
+      ],
+      "title": "ConceptFilter",
+      "type": "object"
+    },
+    "Demographics": {
+      "description": "A block of filters applied directly to the `person` table.\n\nUnlike a `Person` rule inside a group, this block is **always** ANDed with\nthe whole cohort, which lets the solver resolve it as a single JOIN against\n`person` rather than as another `person_id` set to INTERSECT. See\n`AvailabilitySolver._construct_final_query`.\n\nEvery field present is combined with AND.",
+      "properties": {
+        "age": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgeRange"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "gender": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConceptFilter"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              },
+              "minItems": 1
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "race": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConceptFilter"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              },
+              "minItems": 1
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "ethnicity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConceptFilter"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              },
+              "minItems": 1
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "Demographics",
+      "type": "object"
+    },
+    "Group": {
+      "description": "A group of rules, and optionally nested groups, with an operator to combine\nthem.\n\nA group holds `rules` (leaf search criteria), `groups` (nested subgroups), or\nboth. `rules_operator` combines **all** of a group's children \u2014 its rules and\nits nested groups alike \u2014 so there is exactly one operator per level, as\nthere has always been.\n\nNesting is optional and additive: a payload with no `groups` key behaves\nexactly as it did before nesting was supported.",
+      "properties": {
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/Rule"
+          },
+          "title": "Rules",
+          "type": "array"
+        },
+        "groups": {
+          "items": {
+            "$ref": "#/$defs/Group"
+          },
+          "title": "Groups",
+          "type": "array"
+        },
+        "rules_oper": {
+          "enum": [
+            "AND",
+            "OR"
+          ],
+          "title": "Rules Oper",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rules_oper"
+      ],
+      "title": "Group",
+      "type": "object"
+    },
+    "Rule": {
+      "description": "A rule in a group of rules.\n\nSpecifies the search criteria for a rule.",
+      "properties": {
+        "varname": {
+          "default": "",
+          "title": "Varname",
+          "type": "string"
+        },
+        "varcat": {
+          "$ref": "#/$defs/Varcat"
+        },
+        "type": {
+          "default": "TEXT",
+          "enum": [
+            "NUM",
+            "TEXT",
+            "GEO_RADIUS"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "oper": {
+          "default": "=",
+          "enum": [
+            "=",
+            "!="
+          ],
+          "title": "Oper",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": [
+                  "string",
+                  "integer"
+                ]
+              }
+            }
+          ],
+          "default": "",
+          "title": "Value"
+        },
+        "values": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Values",
+          "type": "array",
+          "readOnly": true
+        },
+        "time": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Time"
+        },
+        "secondary_modifier": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": [
+                  "string",
+                  "integer"
+                ]
+              }
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Secondary Modifier"
+        },
+        "raw_range": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Raw Range"
+        },
+        "min_value": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Min Value"
+        },
+        "max_value": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Value"
+        },
+        "center_lat": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Center Lat"
+        },
+        "center_lon": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Center Lon"
+        },
+        "geo_radius_meters": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Geo Radius Meters"
+        },
+        "time_value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Time Value"
+        },
+        "time_category": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Time Category"
+        },
+        "time_unit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Time Unit"
+        },
+        "greater_than_value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Greater Than Value"
+        },
+        "less_than_value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Less Than Value"
+        }
+      },
+      "required": [
+        "varcat"
+      ],
+      "title": "Rule",
+      "type": "object"
+    },
+    "Varcat": {
+      "description": "All values a `Rule.varcat` may take.",
+      "enum": [
+        "Person",
+        "Condition",
+        "Observation",
+        "Drug",
+        "Measurement",
+        "Medication",
+        "Procedure",
+        "Specimen",
+        "Location",
+        "Death"
+      ],
+      "title": "Varcat",
+      "type": "string"
+    }
+  },
+  "description": "The top-level structure of an Availability Query request.\n\nEnables the user to query the availability of a cohort in a collection.",
+  "properties": {
+    "cohort": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Cohort"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "demographics": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Demographics"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "uuid": {
+      "title": "Uuid",
+      "type": "string"
+    },
+    "owner": {
+      "title": "Owner",
+      "type": "string"
+    },
+    "collection": {
+      "title": "Collection",
+      "type": "string"
+    },
+    "protocol_version": {
+      "title": "Protocol Version",
+      "type": "string"
+    },
+    "char_salt": {
+      "title": "Char Salt",
+      "type": "string"
+    }
+  },
+  "required": [
+    "uuid",
+    "owner",
+    "collection",
+    "protocol_version",
+    "char_salt"
+  ],
+  "title": "AvailabilityQuery",
+  "type": "object"
+}

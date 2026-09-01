@@ -8,9 +8,12 @@ class Cohort(BaseModel):
     Represents a collection of groups with an operator to combine them.
     """
 
-    groups: list[Group]
+    groups: list[Group] = Field(default_factory=list)
     """
     Groups of the cohort.
+
+    May be empty when the query filters only on a top-level `demographics`
+    block.
     """
 
     groups_operator: Literal["AND", "OR"] = Field(alias="groups_oper")
@@ -37,3 +40,4 @@ class Cohort(BaseModel):
         """
         if isinstance(v, list):
             return [Group.model_validate(g) for g in v]
+        return v

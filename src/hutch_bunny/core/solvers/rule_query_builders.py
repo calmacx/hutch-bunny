@@ -31,6 +31,12 @@ from typing import Tuple
 import operator as op
 
 from hutch_bunny.core.rquest_models.rule import Rule
+from hutch_bunny.core.rquest_models.demographics import (
+    DEMOGRAPHIC_CONCEPT_FIELDS,
+    AgeRange,
+    ConceptFilter,
+    Demographics,
+)
 from hutch_bunny.core.omop import Varcat
 
 
@@ -155,12 +161,31 @@ class OMOPRuleQueryBuilder:
             select(Death.person_id) if self.is_death_rule and include_death else None
         )
 
+    @staticmethod
+    def _concept_predicate(
+        concept_column: ColumnElement[Any], concept_ids: list[int]
+    ) -> ColumnElement[bool]:
+        """
+        Build the concept predicate for one table's concept column.
+
+        A single concept keeps the `= <id>` form it has always produced; several
+        concepts collapse into one `IN (...)` rather than one query per concept,
+        so a multi-concept rule still reads each table once.
+
+        Args:
+            concept_column: The table's `*_concept_id` column.
+            concept_ids: One or more OMOP concept identifiers.
+
+        Returns:
+            A boolean expression matching any of the concepts.
+        """
+        if len(concept_ids) == 1:
+            return concept_column == concept_ids[0]
+        return concept_column.in_(concept_ids)
+
     def add_concept_constraint(self, concept_id: int) -> "OMOPRuleQueryBuilder":
         """
-        Add OMOP concept ID constraints to filter records across all tables.
-
-        Applies WHERE clauses to each table query to filter for records matching
-        the specified concept ID in the appropriate concept column for each table.
+        Add a single OMOP concept ID constraint across all tables.
 
         Args:
             concept_id: OMOP concept identifier to filter by.
@@ -168,28 +193,51 @@ class OMOPRuleQueryBuilder:
         Returns:
             Self for method chaining.
         """
+        return self.add_concept_constraints([concept_id])
+
+    def add_concept_constraints(
+        self, concept_ids: list[int]
+    ) -> "OMOPRuleQueryBuilder":
+        """
+        Add OMOP concept ID constraints to filter records across all tables.
+
+        Applies WHERE clauses to each table query to filter for records matching
+        any of the specified concept IDs in the appropriate concept column for
+        each table.
+
+        Args:
+            concept_ids: OMOP concept identifiers to filter by.
+
+        Returns:
+            Self for method chaining.
+        """
+        if not concept_ids:
+            return self
+
         self.condition_query = self.condition_query.where(
-            ConditionOccurrence.condition_concept_id == concept_id
+            self._concept_predicate(
+                ConditionOccurrence.condition_concept_id, concept_ids
+            )
         )
         self.drug_query = self.drug_query.where(
-            DrugExposure.drug_concept_id == concept_id
+            self._concept_predicate(DrugExposure.drug_concept_id, concept_ids)
         )
         self.measurement_query = self.measurement_query.where(
-            Measurement.measurement_concept_id == concept_id
+            self._concept_predicate(Measurement.measurement_concept_id, concept_ids)
         )
         self.observation_query = self.observation_query.where(
-            Observation.observation_concept_id == concept_id
+            self._concept_predicate(Observation.observation_concept_id, concept_ids)
         )
         self.procedure_query = self.procedure_query.where(
-            ProcedureOccurrence.procedure_concept_id == concept_id
+            self._concept_predicate(ProcedureOccurrence.procedure_concept_id, concept_ids)
         )
         if self.specimen_query is not None:
             self.specimen_query = self.specimen_query.where(
-                Specimen.specimen_concept_id == concept_id
+                self._concept_predicate(Specimen.specimen_concept_id, concept_ids)
             )
         if self.death_query is not None:
             self.death_query = self.death_query.where(
-                Death.cause_concept_id == concept_id
+                self._concept_predicate(Death.cause_concept_id, concept_ids)
             )
         return self
 
@@ -735,3 +783,105 @@ class PersonConstraintBuilder:
             combined_constraint = constraint
 
         return [combined_constraint if rule.operator == "=" else ~combined_constraint]
+
+
+class DemographicsConstraintBuilder:
+    """
+    Builder for constructing Person table constraints from a top-level
+    `demographics` block.
+
+    This is the block-query counterpart to `PersonConstraintBuilder`. The two
+    differ in where the information comes from and what the solver may assume:
+
+    - `PersonConstraintBuilder` reads a `Person` rule sitting inside a group. The
+      demographic kind is resolved at runtime from `concept.domain_id`, and the
+      rule may sit under an OR, so its result is another `person_id` set to be
+      combined with the rest of the group.
+    - This builder reads a block that names its fields explicitly (no vocabulary
+      lookup needed) and is guaranteed to be ANDed with the whole cohort, so the
+      solver can apply it as a WHERE clause on a single JOIN to `person`.
+
+    That guarantee is the point: it lets the final query join `person` once and
+    count, instead of INTERSECTing two large `person_id` sets.
+    """
+
+    def __init__(self, db_client: BaseDBClient):
+        self.db_client = db_client
+
+    def build_constraints(
+        self, demographics: Demographics
+    ) -> list[ColumnElement[bool]]:
+        """
+        Generate SQLAlchemy filter expressions for the `person` table from a
+        demographics block.
+
+        Args:
+            demographics: The block of demographic filters. Every field present
+                is combined with AND by the caller.
+
+        Returns:
+            List of SQLAlchemy boolean expressions to be applied as WHERE
+            clauses against `person`.
+        """
+        constraints: list[ColumnElement[bool]] = []
+
+        if demographics.age is not None:
+            constraints.append(self._build_age_constraint(demographics.age))
+
+        for field in DEMOGRAPHIC_CONCEPT_FIELDS:
+            concept_filter = getattr(demographics, field)
+            if concept_filter is not None:
+                constraints.append(
+                    self._build_concept_constraint(field, concept_filter)
+                )
+
+        return constraints
+
+    def _build_age_constraint(self, age: AgeRange) -> ColumnElement[bool]:
+        """
+        Build an age constraint from a year-of-birth difference.
+
+        Uses the same year arithmetic as the existing `AGE` rule
+        (`PersonConstraintBuilder._build_age_constraints`), so a demographics
+        block and the equivalent `AGE` rule return identical counts.
+
+        Args:
+            age: The age range in years, inclusive.
+
+        Returns:
+            A boolean expression constraining age.
+        """
+        age_expression = SQLDialectHandler.get_year_difference(
+            self.db_client.engine, func.current_timestamp(), Person.year_of_birth
+        )
+
+        if age.min is not None and age.max is not None:
+            return and_(age_expression >= age.min, age_expression <= age.max)
+        if age.min is not None:
+            return age_expression >= age.min
+        # AgeRange validation guarantees at least one bound is set.
+        return age_expression <= age.max
+
+    @staticmethod
+    def _build_concept_constraint(
+        field: str, concept_filter: ConceptFilter
+    ) -> ColumnElement[bool]:
+        """
+        Build a constraint on one `person` concept column.
+
+        Args:
+            field: One of `gender`, `race` or `ethnicity`.
+            concept_filter: The concept ids to match, and whether to negate.
+
+        Returns:
+            A boolean expression constraining that column.
+        """
+        column: ColumnElement[Any] = getattr(Person, f"{field}_concept_id")
+
+        constraint: ColumnElement[bool]
+        if len(concept_filter.concepts) == 1:
+            constraint = column == concept_filter.concepts[0]
+        else:
+            constraint = column.in_(concept_filter.concepts)
+
+        return ~constraint if concept_filter.exclude else constraint

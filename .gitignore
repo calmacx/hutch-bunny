@@ -171,3 +171,7 @@ cython_debug/
 .pypirc
 
 output.json
+
+# Local env files (only env_example is tracked)
+.env*
+!env_example
