@@ -1,6 +1,6 @@
 import re
 from typing import Any, Literal
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from hutch_bunny.core.omop import Varcat
 
@@ -53,6 +53,20 @@ class Rule(BaseModel):
     TEXT searches have a OMOP concept_id (for example `8507`)
 
     NUM searches have a range value split by `|` (for example 1.0|3.0)
+
+    TEXT searches may also send a **list** of concept_ids (for example
+    `["8507", "8532"]`), which is resolved with a single `IN (...)` per table
+    rather than one query per concept. When a list is sent, this field holds the
+    first element for backwards compatibility and `values` holds them all.
+    """
+
+    values: list[str] = Field(default_factory=list)
+    """
+    All values to search for, derived from `value`.
+
+    Always populated: a single-valued rule yields a one-element list, and an
+    empty `value` (such as the "any death record" sentinel) yields an empty one.
+    Prefer this over `value` when building queries.
     """
 
     time: str | None = None
@@ -105,6 +119,29 @@ class Rule(BaseModel):
         arbitrary_types_allowed=True,
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _normalise_value_list(cls, data: Any) -> Any:
+        """
+        Accept a list of concept ids in `value` and split it across `value` and
+        `values`.
+
+        `value` is typed `str` and is read by the NUM / GEO_RADIUS parsing below,
+        so a list is unpacked here rather than widening the field: `value` keeps
+        the first element (what single-concept callers and older code expect) and
+        `values` carries the full list.
+
+        Args:
+            data: The raw input to the model, usually the decoded rule dictionary.
+
+        Returns:
+            The input, with a list `value` split into `value` + `values`.
+        """
+        if isinstance(data, dict) and isinstance(data.get("value"), list):
+            raw = [str(item) for item in data["value"]]
+            return {**data, "value": raw[0] if raw else "", "values": raw}
+        return data
+
     def model_post_init(self, __context: Any) -> None:
         """
         Initialize numeric values and parse time values after model creation
@@ -152,6 +189,14 @@ class Rule(BaseModel):
         # Parse time values if time is provided
         if self.time:
             self._parse_time()
+
+        # Settle `values` last: NUM and GEO_RADIUS rewrite `value` above, so a
+        # multi-concept list is only meaningful for TEXT rules. Everything else
+        # collapses to the (possibly rewritten, possibly empty) single value.
+        if self.type_ == "TEXT" and self.values:
+            self.values = [value for value in self.values if value != ""]
+        else:
+            self.values = [self.value] if self.value else []
 
     @staticmethod
     def _parse_numeric(value: str) -> tuple[float | None, float | None]:

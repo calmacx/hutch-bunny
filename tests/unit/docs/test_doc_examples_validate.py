@@ -1,35 +1,39 @@
-"""Guard the CDS spec doc against drifting from the JSON Schema.
+"""Guard the availability spec doc and its JSON Schema against drift.
 
-`docs/cds-models-schema.md` is the human-readable contract and
-`docs/cds-query.schema.json` is the machine-readable one. It is easy to edit one
-and forget the other, so this test extracts every fenced ```json block from the
-doc and checks that:
+Three things can fall out of step with each other:
 
-1. it parses as JSON at all, and
-2. if it looks like a full query envelope (it has a `uuid`), it validates
-   against the schema.
+1. the Pydantic models,
+2. `docs/availability-query.schema.json`, generated from them, and
+3. `docs/availability-query-schema.md`, written by hand.
 
-```jsonc blocks are deliberately skipped: they carry `// ...` elisions and are
+This module ties all three together. The schema is regenerated and compared
+against the committed file, and every fenced ```json block in the doc is parsed
+and — when it is a full query — validated against that schema.
+
+```jsonc blocks are deliberately skipped: they carry `//` comments and are
 illustrative fragments rather than payloads.
 """
 
+import importlib.util
 import json
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 from jsonschema import Draft202012Validator
 
-DOCS = Path(__file__).resolve().parents[3] / "docs"
-SPEC_DOC = DOCS / "cds-models-schema.md"
-SCHEMA_FILE = DOCS / "cds-query.schema.json"
+REPO_ROOT = Path(__file__).resolve().parents[3]
+DOCS = REPO_ROOT / "docs"
+SPEC_DOC = DOCS / "availability-query-schema.md"
+SCHEMA_FILE = DOCS / "availability-query.schema.json"
+GENERATOR = REPO_ROOT / "scripts" / "generate_availability_schema.py"
 
 # Fenced blocks tagged exactly `json` (not `jsonc`, `sql`, `bash`, ...).
 JSON_BLOCK = re.compile(r"^```json\n(.*?)^```", re.DOTALL | re.MULTILINE)
 
-# Full-query examples we expect to find, as a canary: if the extraction regex
-# or the doc structure breaks, the test must fail rather than silently pass on
-# an empty list.
+# Canary: if the extraction regex or the doc structure breaks, the test must
+# fail rather than silently pass on an empty list.
 MIN_FULL_QUERY_EXAMPLES = 3
 
 
@@ -37,6 +41,17 @@ def _json_blocks() -> list[tuple[int, str]]:
     """Return (1-indexed block number, raw text) for each ```json block."""
     text = SPEC_DOC.read_text()
     return [(i, m.group(1)) for i, m in enumerate(JSON_BLOCK.finditer(text), start=1)]
+
+
+def _load_generator() -> Any:
+    """Import the schema generator, which lives outside the package."""
+    spec = importlib.util.spec_from_file_location(
+        "generate_availability_schema", GENERATOR
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 @pytest.fixture(scope="module")
@@ -50,6 +65,18 @@ def validator() -> Draft202012Validator:
 def test_spec_doc_and_schema_exist() -> None:
     assert SPEC_DOC.is_file(), f"missing {SPEC_DOC}"
     assert SCHEMA_FILE.is_file(), f"missing {SCHEMA_FILE}"
+
+
+@pytest.mark.unit
+def test_committed_schema_matches_the_models() -> None:
+    """The schema is generated - regenerating it must be a no-op."""
+    expected = _load_generator().build_schema()
+    committed = json.loads(SCHEMA_FILE.read_text())
+
+    assert committed == expected, (
+        "docs/availability-query.schema.json is out of date with the models. "
+        "Run: uv run python scripts/generate_availability_schema.py"
+    )
 
 
 @pytest.mark.unit
@@ -88,65 +115,104 @@ def test_full_query_examples_validate(validator: Draft202012Validator) -> None:
 
 
 @pytest.mark.unit
-def test_schema_rejects_a_query_with_neither_cohort_nor_demographics(
+def test_existing_query_fixtures_still_validate(
     validator: Draft202012Validator,
 ) -> None:
-    """The `anyOf` on the root must actually bite — an envelope carrying no
-    query body would otherwise count the whole population."""
-    empty = {"uuid": "unique_id", "collection": "collection_id"}
-    assert list(validator.iter_errors(empty)), (
-        "schema accepted a query with neither 'cohort' nor 'demographics'"
-    )
+    """Every payload the test suite already uses must pass the schema.
+
+    The spec changes are meant to be additive, so a fixture written before them
+    failing here would mean a genuine break in backwards compatibility.
+    """
+    fixtures = sorted((REPO_ROOT / "tests" / "queries" / "availability").glob("*.json"))
+    assert fixtures, "no availability fixtures found"
+
+    for fixture in fixtures:
+        payload = json.loads(fixture.read_text())
+        errors = sorted(validator.iter_errors(payload), key=lambda e: e.path)
+        assert not errors, "{} fails the schema:\n{}".format(
+            fixture.name,
+            "\n".join(f"  {list(e.path)}: {e.message}" for e in errors),
+        )
 
 
 @pytest.mark.unit
-def test_schema_rejects_removed_demographic_node(
-    validator: Draft202012Validator,
-) -> None:
-    """`kind: "demographic"` was removed from the node union in revision 2;
-    demographics live in the top-level block instead."""
+def test_schema_accepts_a_list_of_concepts(validator: Draft202012Validator) -> None:
     payload = {
         "uuid": "unique_id",
+        "owner": "user1",
         "collection": "collection_id",
+        "protocol_version": "v2",
+        "char_salt": "salt",
         "cohort": {
-            "kind": "group",
-            "operator": "AND",
-            "children": [
-                {"kind": "demographic", "field": "gender", "concepts": [8507]}
+            "groups_oper": "AND",
+            "groups": [
+                {
+                    "rules_oper": "AND",
+                    "rules": [
+                        {
+                            "varname": "OMOP",
+                            "varcat": "Condition",
+                            "type": "TEXT",
+                            "oper": "=",
+                            "value": ["201826", "4214962"],
+                        }
+                    ],
+                }
             ],
-        },
-    }
-    assert list(validator.iter_errors(payload)), (
-        "schema still accepts a 'demographic' node inside the cohort tree"
-    )
-
-
-@pytest.mark.unit
-def test_schema_accepts_clinical_rule_without_domains(
-    validator: Draft202012Validator,
-) -> None:
-    """Omitting `domains` is the safe default (fan out across all five clinical
-    tables), so it must not be a structural error."""
-    payload = {
-        "uuid": "unique_id",
-        "collection": "collection_id",
-        "cohort": {
-            "kind": "group",
-            "operator": "AND",
-            "children": [{"kind": "clinical", "concepts": [201826, 4214962]}],
         },
     }
     assert not list(validator.iter_errors(payload))
 
 
 @pytest.mark.unit
-def test_schema_accepts_demographics_only_query(
-    validator: Draft202012Validator,
-) -> None:
-    """A demographics-only count needs no clinical tree."""
+def test_schema_accepts_nested_groups(validator: Draft202012Validator) -> None:
     payload = {
         "uuid": "unique_id",
+        "owner": "user1",
         "collection": "collection_id",
-        "demographics": {"age": {"min": 40, "max": 70}, "gender": [8532]},
+        "protocol_version": "v2",
+        "char_salt": "salt",
+        "cohort": {
+            "groups_oper": "AND",
+            "groups": [
+                {
+                    "rules_oper": "AND",
+                    "groups": [
+                        {
+                            "rules_oper": "OR",
+                            "rules": [
+                                {"varcat": "Measurement", "value": "444"},
+                                {"varcat": "Procedure", "value": "555"},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+    assert not list(validator.iter_errors(payload))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "demographics",
+    [
+        {"age": {"min": 40, "max": 70}},
+        {"age": "40|70"},
+        {"gender": [8532]},
+        {"race": {"concepts": [8527], "exclude": True}},
+    ],
+)
+def test_schema_accepts_demographics_shorthands(
+    validator: Draft202012Validator, demographics: dict[str, Any]
+) -> None:
+    """The generator widens these; the schema must accept what Pydantic does."""
+    payload = {
+        "uuid": "unique_id",
+        "owner": "user1",
+        "collection": "collection_id",
+        "protocol_version": "v2",
+        "char_salt": "salt",
+        "demographics": demographics,
     }
     assert not list(validator.iter_errors(payload))

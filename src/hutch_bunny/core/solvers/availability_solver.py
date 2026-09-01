@@ -1,5 +1,5 @@
 from logging import DEBUG
-from typing import TypedDict, Union, Literal
+from typing import Any, TypedDict, Union, Literal
 from sqlalchemy import (
     CompoundSelect,
     func,
@@ -9,7 +9,8 @@ from sqlalchemy import (
     intersect,
     union,
     literal, 
-    or_
+    or_,
+    distinct
 )
 from hutch_bunny.core.db import BaseDBClient
 from hutch_bunny.core.db.entities import (
@@ -31,7 +32,11 @@ from hutch_bunny.core.rquest_models.availability import AvailabilityQuery
 from hutch_bunny.core.logger import logger
 from hutch_bunny.core.rquest_models.rule import Rule
 from hutch_bunny.core.omop import Varcat
-from hutch_bunny.core.solvers.rule_query_builders import OMOPRuleQueryBuilder, PersonConstraintBuilder
+from hutch_bunny.core.solvers.rule_query_builders import (
+    DemographicsConstraintBuilder,
+    OMOPRuleQueryBuilder,
+    PersonConstraintBuilder,
+)
 from hutch_bunny.core.db.utils import log_query
 from hutch_bunny.core.settings import Settings
 
@@ -58,6 +63,7 @@ class AvailabilitySolver():
         self.db_client = db_client
         self.query = query
         self.person_constraint_builder = PersonConstraintBuilder(db_client)
+        self.demographics_constraint_builder = DemographicsConstraintBuilder(db_client)
 
     @retry(
         stop=stop_after_attempt(3),
@@ -73,14 +79,17 @@ class AvailabilitySolver():
         3. Combining groups with AND/OR logic
         4. Executing the final query and applying filters
         """
-        concepts = self._find_concepts(self.query.cohort.groups)
+        groups = self.query.cohort.groups if self.query.cohort is not None else []
+        concepts = self._find_concepts(groups)
         low_number = self._extract_modifier(results_modifiers, "Low Number Suppression", "threshold", 10)
         rounding = self._extract_modifier(results_modifiers, "Rounding", "nearest", 10)
+
+        count = 0
 
         with self.db_client.engine.connect() as con:
             group_queries = []
 
-            for group in self.query.cohort.groups:
+            for group in groups:
                 group_query = self._build_group_query(group, concepts)
                 group_queries.append(group_query)
 
@@ -110,10 +119,11 @@ class AvailabilitySolver():
         """
         concept_ids = set()
         for group in groups:
-            for rule in group.rules:
-                # Guard for None values (e.g. Age)
-                if rule.value:
-                    concept_ids.add(int(rule.value))
+            # all_rules() walks nested groups, so concepts are found at any depth
+            for rule in group.all_rules():
+                # Guard for rules that carry no concept (e.g. Age, geo-radius)
+                for value in rule.values:
+                    concept_ids.add(int(value))
 
         concept_query = (
             # order must be .concept_id, .domain_id
@@ -173,7 +183,16 @@ class AvailabilitySolver():
                     'inclusion': inclusion_criteria
                 })
 
-        return self._construct_group_query(group, person_constraints, rule_table_queries)
+        # A nested group resolves to a person_id set exactly like a rule does, so
+        # it joins its parent's children and is combined by the same operator.
+        nested_group_queries = [
+            self._build_group_query(nested_group, concepts)
+            for nested_group in group.groups
+        ]
+
+        return self._construct_group_query(
+            group, person_constraints, rule_table_queries, nested_group_queries
+        )
 
     def _build_rule_query(self, rule: Rule) -> CompoundSelect:
         """Build query for a single non-Person rule."""
@@ -185,8 +204,8 @@ class AvailabilitySolver():
             varcat=rule.varcat,
         )
 
-        if rule.value:
-            builder.add_concept_constraint(int(rule.value))
+        if rule.values:
+            builder.add_concept_constraints([int(value) for value in rule.values])
 
         valid_time_constraint = rule.greater_than_value or rule.less_than_value
 
@@ -222,7 +241,8 @@ class AvailabilitySolver():
         self,
         current_group: Group,
         person_constraints_for_group: list[ColumnElement[bool]],
-        rule_table_queries: list[RuleTableQuery]
+        rule_table_queries: list[RuleTableQuery],
+        nested_group_queries: list[Union[Select[Tuple[int]], CompoundSelect[Tuple[int]]]] | None = None
     ) -> Union[Select[Tuple[int]], CompoundSelect]:
         """
         Construct the query for a single group by processing inclusion/exclusion rules.
@@ -231,6 +251,9 @@ class AvailabilitySolver():
             current_group: The group to construct a query for
             person_constraints_for_group: Person-level constraints for this group
             rule_table_queries: List of rule table queries for this group
+            nested_group_queries: Already-built queries for this group's nested
+                subgroups. Combined with the group's own rules using the same
+                `rules_operator`.
 
         Returns:
             The constructed group query
@@ -248,6 +271,10 @@ class AvailabilitySolver():
                 # For AND logic or single constraint, use AND (default)
                 person_query = select(Person.person_id).where(*person_constraints_for_group)
             inclusion_queries.append(person_query)
+
+        # Nested subgroups are inclusion sets in their own right
+        if nested_group_queries:
+            inclusion_queries.extend(nested_group_queries)
 
         # Add table queries for each rule
         if rule_table_queries:
@@ -303,6 +330,91 @@ class AvailabilitySolver():
 
         return group_query
 
+    def _build_demographic_constraints(self) -> list[ColumnElement[bool]]:
+        """
+        Build the WHERE constraints for the top-level `demographics` block.
+
+        Returns:
+            The constraints, or an empty list when the query has no demographics
+            block.
+        """
+        if self.query.demographics is None:
+            return []
+        return self.demographics_constraint_builder.build_constraints(
+            self.query.demographics
+        )
+
+    def _combine_group_queries(
+        self,
+        all_groups_queries: list[Union[Select[Tuple[int]], CompoundSelect[Tuple[int]]]]
+    ) -> Union[Select[Tuple[int]], CompoundSelect[Tuple[int]]] | None:
+        """
+        Combine each group's query into a single statement yielding person_ids.
+
+        Args:
+            all_groups_queries: List of queries, one per top-level group.
+
+        Returns:
+            A UNION (for OR) or INTERSECT (for AND) over the group CTEs, or None
+            when the query has no groups at all.
+        """
+        if not all_groups_queries:
+            return None
+
+        group_ctes = [
+            query.cte(name=f"final_group_{index}")
+            for index, query in enumerate(all_groups_queries)
+        ]
+        group_selects = [select(cte) for cte in group_ctes]
+
+        groups_operator = (
+            self.query.cohort.groups_operator if self.query.cohort is not None else "AND"
+        )
+        if groups_operator == "OR":
+            return union(*group_selects)
+        return intersect(*group_selects)
+
+    @staticmethod
+    def _apply_obfuscation(
+        query: Select[Tuple[int]],
+        count_expression: ColumnElement[Any],
+        low_number: int
+    ) -> Select[Tuple[int]]:
+        """
+        Apply low-number suppression to a count query.
+
+        A suppressed count returns no row at all, which the caller reports as 0.
+
+        Args:
+            query: The count query to constrain.
+            count_expression: The raw (un-rounded) count being suppressed.
+            low_number: The suppression threshold; 0 disables suppression.
+
+        Returns:
+            The query, with a HAVING clause when suppression is enabled.
+        """
+        if low_number > 0:
+            return query.having(count_expression >= low_number)
+        return query
+
+    @staticmethod
+    def _round_count(
+        count_expression: ColumnElement[Any], rounding: int
+    ) -> ColumnElement[Any]:
+        """
+        Wrap a count in SQL-side rounding.
+
+        Args:
+            count_expression: The raw count.
+            rounding: Round to the nearest this; 0 disables rounding.
+
+        Returns:
+            The rounded count expression, or the raw count when disabled.
+        """
+        if rounding > 0:
+            return func.round((count_expression / rounding), 0) * rounding
+        return count_expression
+
     def _construct_final_query(
         self,
         all_groups_queries: list[Union[Select[Tuple[int]], CompoundSelect]],
@@ -310,66 +422,75 @@ class AvailabilitySolver():
         low_number: int
     ) -> Select[Tuple[int]]:
         """
-        Construct the final query by applying OR/AND logic between groups using CTEs.
+        Construct the final counting query.
+
+        Groups are combined with OR/AND logic using CTEs, exactly as before. What
+        changes when the query carries a top-level `demographics` block is the
+        final step:
+
+        - **Without demographics** the cohort set is counted directly, unchanged.
+        - **With demographics** the cohort set is JOINed to `person` and the
+          demographic filters are applied as WHERE clauses on that join.
+
+        The JOIN matters. A `Person` rule inside a group becomes another
+        `person_id` set that has to be INTERSECTed with the cohort set, and on a
+        large collection that means sorting two multi-million-row sets and
+        spilling to disk - it dominated the runtime in the query-optimisation
+        study. Because a `demographics` block is guaranteed to be a conjunction,
+        the same filter can instead ride along on a join to `person` and be
+        counted once.
 
         Args:
             all_groups_queries: List of queries for each group
             rounding: Rounding factor for the final count
+            low_number: Low number suppression threshold
 
         Returns:
             The final query that counts the results with appropriate rounding
         """
-        if self.query.cohort.groups_operator == "OR":
-            # For OR logic between groups, use UNION with CTEs
-            if all_groups_queries:
-                # Create CTEs for all group queries
-                group_ctes = []
-                for i, query in enumerate(all_groups_queries):
-                    cte_name = f"final_group_{i}"
-                    cte = query.cte(name=cte_name)
-                    group_ctes.append(cte)
+        demographic_constraints = self._build_demographic_constraints()
+        combined_groups = self._combine_group_queries(all_groups_queries)
 
-                # Union all group CTEs by selecting from them
-                group_union_queries = [select(cte) for cte in group_ctes]
-                final_union = union(*group_union_queries)
-
-                if rounding > 0:
-                    full_query_all_groups = select(
-                        func.round((func.count() / rounding), 0) * rounding
-                    ).select_from(final_union.subquery())
-                else:
-                    full_query_all_groups = select(func.count()).select_from(final_union.subquery())
-            else:
-                # Fallback to empty query
+        if combined_groups is None:
+            if not demographic_constraints:
+                # Nothing to count. Model validation normally prevents this.
                 full_query_all_groups = select(func.count()).where(literal(False))
+            else:
+                # Demographics-only query: `person` is the whole cohort.
+                count_expression = func.count(distinct(Person.person_id))
+                full_query_all_groups = (
+                    select(self._round_count(count_expression, rounding))
+                    .select_from(Person)
+                    .where(*demographic_constraints)
+                )
+                full_query_all_groups = self._apply_obfuscation(
+                    full_query_all_groups, count_expression, low_number
+                )
+        elif demographic_constraints:
+            # Join the cohort set to `person` and filter there, rather than
+            # INTERSECTing it with a second large person_id set.
+            cohort_subquery = combined_groups.subquery()
+            # Every group query selects a person_id column, whatever table it
+            # came from, so the join column is always named.
+            person_id_column = cohort_subquery.c.person_id
+            count_expression = func.count(distinct(person_id_column))
+
+            full_query_all_groups = (
+                select(self._round_count(count_expression, rounding))
+                .select_from(cohort_subquery)
+                .join(Person, Person.person_id == person_id_column)
+                .where(*demographic_constraints)
+            )
+            full_query_all_groups = self._apply_obfuscation(
+                full_query_all_groups, count_expression, low_number
+            )
         else:
-            # For AND logic between groups, use INTERSECT with CTEs
-            if all_groups_queries:
-                # Create CTEs for all group queries
-                group_ctes = []
-                for i, query in enumerate(all_groups_queries):
-                    cte_name = f"final_group_{i}"
-                    cte = query.cte(name=cte_name)
-                    group_ctes.append(cte)
-
-                # Use INTERSECT for AND logic between groups
-                group_intersect_queries = [select(cte) for cte in group_ctes]
-                final_intersect = intersect(*group_intersect_queries)
-
-                if rounding > 0:
-                    full_query_all_groups = select(
-                        func.round((func.count() / rounding), 0) * rounding
-                    ).select_from(final_intersect.subquery())
-                else:
-                    full_query_all_groups = select(func.count()).select_from(final_intersect.subquery())
-
-            else:
-                # Fallback to empty query
-                full_query_all_groups = select(func.count()).where(literal(False))
-
-        if low_number > 0:
-            full_query_all_groups = full_query_all_groups.having(
-                func.count() >= low_number
+            # No demographics block - count the cohort set directly, as before.
+            full_query_all_groups = select(
+                self._round_count(func.count(), rounding)
+            ).select_from(combined_groups.subquery())
+            full_query_all_groups = self._apply_obfuscation(
+                full_query_all_groups, func.count(), low_number
             )
 
         log_query(
