@@ -61,6 +61,8 @@ dev = [
     "pytest-cov>=7.1.0",
     "pre-commit>=4.6.2",
     "types-python-dateutil>=2.9.0.20260807",
+    "jsonschema>=4.25.0",
+    "types-jsonschema>=4.25.0",
 ]
 
 [tool.pytest.ini_options]

@@ -1,0 +1,525 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hdruk.github.io/hutch-bunny/cds-query.schema.json",
+  "$defs": {
+    "CdsClinicalRule": {
+      "description": "A concept search against one or more OMOP clinical domains.\n\nConcepts are resolved with a single ``WHERE <concept_col> IN (...)`` per\ndomain. Omitting ``domains`` fans the search out across all five clinical\ntables, which is the safe default; supplying it narrows the search.",
+      "properties": {
+        "kind": {
+          "const": "clinical",
+          "default": "clinical",
+          "title": "Kind",
+          "type": "string"
+        },
+        "concepts": {
+          "items": {
+            "type": "integer"
+          },
+          "minItems": 1,
+          "title": "Concepts",
+          "type": "array"
+        },
+        "domains": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/Domain"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Domains"
+        },
+        "domain": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Domain"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Shorthand for a single-element `domains`. Mutually exclusive with `domains`."
+        },
+        "exclude": {
+          "default": false,
+          "title": "Exclude",
+          "type": "boolean"
+        },
+        "value_range": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Range"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "age_at_event": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Range"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "after_gap": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Range"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "concepts"
+      ],
+      "title": "CdsClinicalRule",
+      "type": "object"
+    },
+    "CdsDeathFilter": {
+      "description": "A filter on the ``death`` table. Gated by ``OMOP_DEATH_ENABLED``.",
+      "properties": {
+        "status": {
+          "anyOf": [
+            {
+              "enum": [
+                "deceased",
+                "alive"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status"
+        },
+        "cause_concepts": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "integer"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cause Concepts"
+        },
+        "age_at_death": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Range"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "CdsDeathFilter",
+      "type": "object"
+    },
+    "CdsDemographics": {
+      "description": "Top-level filter block on the ``person`` table. Every key present is ANDed,\nboth with each other and with the cohort predicate.",
+      "properties": {
+        "age": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Range"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "gender": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConceptFilter"
+            },
+            {
+              "items": {
+                "type": "integer"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gender"
+        },
+        "race": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConceptFilter"
+            },
+            {
+              "items": {
+                "type": "integer"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Race"
+        },
+        "ethnicity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConceptFilter"
+            },
+            {
+              "items": {
+                "type": "integer"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ethnicity"
+        },
+        "location": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CdsLocationFilter"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "death": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CdsDeathFilter"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "CdsDemographics",
+      "type": "object"
+    },
+    "CdsGroup": {
+      "description": "A combination of child nodes, nestable to any depth up to MAX_GROUP_DEPTH.\n\n``AND`` / ``OR`` are boolean combinations of the children's predicates.\n``AFTER`` is a temporal sequence: the children are ordered clinical events\nthat must occur one strictly after another (a patient pathway).",
+      "properties": {
+        "kind": {
+          "const": "group",
+          "default": "group",
+          "title": "Kind",
+          "type": "string"
+        },
+        "operator": {
+          "enum": [
+            "AND",
+            "OR",
+            "AFTER"
+          ],
+          "title": "Operator",
+          "type": "string"
+        },
+        "children": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "clinical": "#/$defs/CdsClinicalRule",
+                "group": "#/$defs/CdsGroup"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/CdsGroup"
+              },
+              {
+                "$ref": "#/$defs/CdsClinicalRule"
+              }
+            ]
+          },
+          "minItems": 1,
+          "title": "Children",
+          "type": "array"
+        },
+        "exclude": {
+          "default": false,
+          "title": "Exclude",
+          "type": "boolean"
+        },
+        "after_gap": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Range"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "operator",
+        "children"
+      ],
+      "title": "CdsGroup",
+      "type": "object"
+    },
+    "CdsLocationFilter": {
+      "description": "A filter reached through ``person.location_id``. Gated by\n``OMOP_LOCATION_ENABLED``. Multiple keys are ANDed.",
+      "properties": {
+        "geo_radius": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GeoRadius"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "country_concepts": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "integer"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Country Concepts"
+        },
+        "source_values": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Values"
+        },
+        "exclude": {
+          "default": false,
+          "title": "Exclude",
+          "type": "boolean"
+        }
+      },
+      "title": "CdsLocationFilter",
+      "type": "object"
+    },
+    "ConceptFilter": {
+      "description": "A concept-id ``IN`` list on a single ``person`` column, optionally negated.\n\nMay also be written as a bare array of concept ids, which is shorthand for\n``{\"concepts\": [...], \"exclude\": false}``.",
+      "properties": {
+        "concepts": {
+          "items": {
+            "type": "integer"
+          },
+          "minItems": 1,
+          "title": "Concepts",
+          "type": "array"
+        },
+        "exclude": {
+          "default": false,
+          "title": "Exclude",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "concepts"
+      ],
+      "title": "ConceptFilter",
+      "type": "object"
+    },
+    "Domain": {
+      "description": "An OMOP clinical domain. Each maps to exactly one table.",
+      "enum": [
+        "Condition",
+        "Observation",
+        "Drug",
+        "Medication",
+        "Measurement",
+        "Procedure",
+        "Specimen"
+      ],
+      "title": "Domain",
+      "type": "string"
+    },
+    "GeoRadius": {
+      "description": "A circle around a point, in metres.",
+      "properties": {
+        "latitude": {
+          "maximum": 90,
+          "minimum": -90,
+          "title": "Latitude",
+          "type": "number"
+        },
+        "longitude": {
+          "maximum": 180,
+          "minimum": -180,
+          "title": "Longitude",
+          "type": "number"
+        },
+        "radius_metres": {
+          "exclusiveMinimum": 0,
+          "title": "Radius Metres",
+          "type": "number"
+        }
+      },
+      "required": [
+        "latitude",
+        "longitude",
+        "radius_metres"
+      ],
+      "title": "GeoRadius",
+      "type": "object"
+    },
+    "Range": {
+      "description": "A double-sided numeric range. Either bound may be omitted for an\nopen-ended range, but at least one must be present.\n\nTranslated to a SQL ``BETWEEN`` when both bounds are set, or a single\n``>=`` / ``<=`` when only one is set.",
+      "properties": {
+        "min": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Min"
+        },
+        "max": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max"
+        }
+      },
+      "title": "Range",
+      "type": "object"
+    }
+  },
+  "description": "The top-level structure of a CDS availability query.\n\nMirrors the ``rquest_models`` :class:`AvailabilityQuery` envelope so the\nresult is POSTed back upstream in exactly the same shape, but the query body\nis a recursive :class:`CdsGroup` tree plus a top-level demographics block,\nrather than the fixed two-level ``Cohort -> Group -> Rule`` structure.",
+  "properties": {
+    "cohort": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CdsGroup"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "demographics": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CdsDemographics"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "uuid": {
+      "title": "Uuid",
+      "type": "string"
+    },
+    "collection": {
+      "title": "Collection",
+      "type": "string"
+    },
+    "owner": {
+      "default": "user1",
+      "title": "Owner",
+      "type": "string"
+    },
+    "protocol_version": {
+      "default": "v2",
+      "title": "Protocol Version",
+      "type": "string"
+    },
+    "char_salt": {
+      "default": "",
+      "title": "Char Salt",
+      "type": "string"
+    }
+  },
+  "required": [
+    "uuid",
+    "collection"
+  ],
+  "anyOf": [
+    {
+      "required": [
+        "cohort"
+      ]
+    },
+    {
+      "required": [
+        "demographics"
+      ]
+    }
+  ],
+  "title": "CdsQuery",
+  "type": "object"
+}
