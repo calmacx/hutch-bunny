@@ -21,12 +21,15 @@ from sqlalchemy import create_engine
 from hutch_bunny.core.rquest_models.availability import AvailabilityQuery
 from hutch_bunny.core.solvers.availability_solver import AvailabilitySolver
 
-CLINICAL_TABLES = (
-    "measurement",
-    "observation",
-    "condition_occurrence",
-    "drug_exposure",
-    "procedure_occurrence",
+# The concept column searched in each clinical table. Assertions are made per
+# table rather than on a total count, because optional tables (specimen, gated
+# by OMOP_SPECIMEN_ENABLED) join the fan-out depending on the environment.
+CLINICAL_CONCEPT_COLUMNS = (
+    "measurement.measurement_concept_id",
+    "observation.observation_concept_id",
+    "condition_occurrence.condition_concept_id",
+    "drug_exposure.drug_concept_id",
+    "procedure_occurrence.procedure_concept_id",
 )
 
 
@@ -87,11 +90,10 @@ def test_multiple_concepts_become_one_in_clause_per_table() -> None:
         }
     )
 
-    for table in CLINICAL_TABLES:
-        assert table in sql
-
     # One IN per table, not one query per concept.
-    assert sql.count("IN (201826, 4214962, 4181583)") == len(CLINICAL_TABLES)
+    for column in CLINICAL_CONCEPT_COLUMNS:
+        assert f"{column} IN (201826, 4214962, 4181583)" in sql
+
     assert "= 201826" not in sql
 
 
@@ -106,7 +108,8 @@ def test_integer_concepts_are_accepted() -> None:
         }
     )
 
-    assert sql.count("IN (201826, 4214962)") == len(CLINICAL_TABLES)
+    for column in CLINICAL_CONCEPT_COLUMNS:
+        assert f"{column} IN (201826, 4214962)" in sql
 
 
 @pytest.mark.unit
